@@ -1,0 +1,105 @@
+# ============================================================
+# WarmUpView.ai — .gitignore
+# ============================================================
+
+# --- Sensitive / Environment ---
+backend/.env
+.env
+*.env
+
+# --- Database ---
+backend/warmupview.db
+*.db
+*.sqlite
+
+# --- Uploaded / Generated Media ---
+backend/recordings/
+backend/snapshots/
+backend/uploads/
+backend/temp_reports/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Jupyter Notebooks cache ---
+.ipynb_checkpoints/
+
+# --- ML Models (large files) ---
+*.h5
+*.onnx
+*.pt
+*.pth
+
+# --- Node / JS ---
+node_modules/
+npm-debug.log*
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDE ---
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# --- Large binaries ---
+backend/ffmpeg.exe
+*.exe
+*.rar
+*.zip
+
+# --- Temp / Scratch ---
+tmp/
+scratch/
+*.tmp
+*.log
+
+# --- Replit ---
+.replit
+replit.nix
+
+# --- Generator scripts (internal tooling) ---
+gen_*.py
+check_*.py
+fix_*.py
+sync_*.py
+restore_*.py
+migrate_*.py
+export_*.py
+extract_*.py
+read_*.py
+get_*.py
+convert_*.py
+enhance_*.py
+take_screenshots.py
+copy_images.py
+simple_test.py
+test_write.py
+
+# --- Draft / internal docs ---
+chapters_1_3_dump*.txt
+notebook_summary.txt
+dr_instructions.txt
+final\ inputs\ claude\ for\ report/
+final\ inputs\ claude\ for\ report.rar
+edits/
