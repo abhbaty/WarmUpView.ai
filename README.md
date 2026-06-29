@@ -12,7 +12,6 @@
 [![Groq](https://img.shields.io/badge/Groq-Llama_3.3_70B-00CC88?style=for-the-badge)](https://groq.com)
 [![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10.5-FF6F00?style=for-the-badge&logo=google&logoColor=white)](https://mediapipe.dev)
 [![SQLite](https://img.shields.io/badge/SQLite-Database-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://sqlite.org)
-[![License](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)](LICENSE)
 
 > **Practice interviews with AI, get real-time multimodal feedback on your voice, emotions, eye contact, posture, and CV — all in your browser.**
 
@@ -27,11 +26,11 @@
 | Module | Description |
 |---|---|
 | 🎙️ **Warm-up Simulator** | Voice-only practice with 4 AI personas, real-time STT/TTS, 5-stage interview flow |
-| 🎥 **Real Interview Mode** | Webcam recording, CV-tailored questions, live coding challenge, multimodal analysis |
+| 🎥 **Real Interview Mode** | Webcam recording with Simli visual avatar, CV-tailored questions, live coding challenge, multimodal analysis |
 | 📄 **CV Analyzer** | ATS scoring, skill gap detection, red-pen annotations, actionable roadmap |
 | 📊 **Performance Report** | Emotion timeline, eye contact %, posture donut chart, voice tone, peak snapshots |
 | 🗂️ **History Dashboard** | Track progress across sessions, filter by status, compare sessions |
-| 🔐 **Auth System** | Secure login/signup with session management |
+| 🔐 **Auth System** | Secure login/signup with email + Google OAuth |
 
 ---
 
@@ -41,18 +40,23 @@
 
 ![System Architecture](docs/images/system_architecture.png)
 
-The platform is built on a **FastAPI** backend with **WebSocket**-driven real-time communication, connected to multiple AI services and a local ML pipeline for non-verbal analysis.
+The platform is built on a **FastAPI** backend with **WebSocket**-driven real-time communication, connected to multiple AI and external services along with a local ML pipeline for non-verbal analysis.
 
 ```
-User Browser  ←──WebSocket / REST──→  FastAPI Backend  ←──→  Groq / Gemini / Deepgram / Edge-TTS
+User Browser  ←──WebSocket / REST──→  FastAPI Backend  ←──→  Groq / Gemini / Deepgram
                                               │
-                                    Analysis Worker (subprocess)
-                                              │
-                               ┌──────────────┼──────────────┐
-                          Keras CNN      MediaPipe        Librosa
-                         (Emotion)     (Gaze + Pose)     (Tone)
-                                              │
-                                         SQLite DB
+                                    ┌─────────┴──────────┐
+                                    │                    │
+                              ElevenLabs TTS       Simli Avatar
+                            (fallback: Edge-TTS)     (WebRTC)
+                                    │
+                          Analysis Worker (subprocess)
+                                    │
+                     ┌──────────────┼──────────────┐
+                Keras CNN      MediaPipe        Librosa
+               (Emotion)     (Gaze + Pose)     (Tone)
+                                    │
+                               SQLite DB
 ```
 
 ---
@@ -65,8 +69,8 @@ The warm-up module uses a **5-stage conversation engine**:
 
 ```
 Stage 1: Warmup  →  Stage 2: Behavioral  →  Stage 3: Communication
-                                         →  Stage 4: Technical
-                                         →  Stage 5: Reflection
+                                          →  Stage 4: Technical
+                                          →  Stage 5: Reflection
 ```
 
 Each stage selects 2–3 random questions from a pool. The system detects voice commands (`"end session"`) and auto-advances stages when quotas are met. Silence is handled gracefully with progressive nudges at 20s, 40s, and 60s.
@@ -84,6 +88,12 @@ Each stage selects 2–3 random questions from a pool. The system detects voice 
 | Audio tone analysis (primary) | **Gemini** | `gemini-2.5-flash` (audio inline) |
 | Audio tone analysis (fallback) | **Librosa** | Local — confidence + hesitation + pace |
 | CV analysis & feedback | **Gemini** | `gemini-2.5-flash` |
+
+**TTS Routing:**
+| Module | Primary TTS | Fallback TTS |
+|---|---|---|
+| Warm-up Interview | Edge-TTS (Microsoft Neural Voices) | — |
+| Real Interview | ElevenLabs (streaming PCM/MP3) | Edge-TTS |
 
 ---
 
@@ -119,16 +129,17 @@ Acceptance Rate = (Emotion × 0.20) + (Eye Contact × 0.25) + (Posture × 0.20) 
 
 ![Database ERD](docs/images/database_erd.png)
 
-Six core tables power the platform:
+Seven core tables power the platform:
 
 | Table | Purpose |
 |---|---|
-| `interview_sessions` | Warm-up session records with evaluation JSON |
+| `users` | User accounts (email + Google OAuth), admin flag |
+| `interview_sessions` | Warm-up session records with evaluation JSON and score |
 | `session_messages` | Per-turn conversation transcript |
 | `cv_profiles` | Extracted CV data with hash-based deduplication |
 | `job_requirements` | Job descriptions and cached AI-generated questions |
-| `real_interview_sessions` | Full interview session with video/timeline paths |
-| `analysis_results` | Multimodal scores: emotion, gaze, pose, tone, snapshots |
+| `real_interview_sessions` | Full interview session with video/timeline paths and transcript |
+| `analysis_results` | Multimodal scores: emotion, gaze, pose, tone, snapshots, transcript evaluation |
 
 ---
 
@@ -183,12 +194,14 @@ Six core tables power the platform:
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| **Backend** | Python 3.10+, FastAPI, Uvicorn | API server, WebSocket handling |
-| **Database** | SQLite, SQLAlchemy (async) | Persistent data storage |
+| **Backend** | Python 3.10+, FastAPI 0.115.6, Uvicorn | API server, WebSocket handling |
+| **Database** | SQLite, SQLAlchemy (async) + aiosqlite | Persistent data storage |
 | **LLM (Primary)** | Groq — `llama-3.3-70b-versatile` | Fast inference for conversation & evaluation |
 | **LLM (Secondary)** | Google Gemini 2.5 Flash | CV analysis, audio tone understanding |
 | **Speech-to-Text** | Deepgram Nova-2 | Real-time streaming transcription |
-| **Text-to-Speech** | Edge-TTS (Microsoft voices) | AI persona voices |
+| **Text-to-Speech (Primary)** | ElevenLabs API (streaming) | High-quality AI voice for real interviews |
+| **Text-to-Speech (Fallback)** | Edge-TTS (Microsoft Neural Voices) | Free TTS for warm-up & fallback |
+| **Visual Avatar** | Simli (WebRTC) | Animated visual avatar for real interviews |
 | **Emotion Detection** | Keras CNN + ONNX Runtime | 7-class facial emotion classification |
 | **Gaze Tracking** | MediaPipe FaceMesh | Iris landmark-based eye contact detection |
 | **Pose Analysis** | MediaPipe Pose | 33-landmark body language scoring |
@@ -197,6 +210,7 @@ Six core tables power the platform:
 | **Frontend** | Vanilla HTML/CSS/JS | Zero-framework responsive UI |
 | **Code Editor** | Monaco Editor (CDN) | In-browser coding challenge environment |
 | **Video** | Web MediaRecorder API, FFmpeg | WebM recording, audio mixing |
+| **Auth** | Google OAuth + email/password, SessionMiddleware | User authentication |
 
 ---
 
@@ -205,9 +219,12 @@ Six core tables power the platform:
 ### Prerequisites
 
 - Python 3.10+
-- [Deepgram API Key](https://deepgram.com) — for real-time STT
-- [Google Gemini API Key](https://aistudio.google.com) — for LLM & CV analysis
-- [Groq API Key](https://console.groq.com) — for fast LLM inference
+- [Groq API Key](https://console.groq.com) — for LLM inference (conversation & evaluation)
+- [Google Gemini API Key](https://aistudio.google.com) — for CV analysis & audio tone
+- [Deepgram API Key](https://deepgram.com) — for real-time Speech-to-Text
+- [ElevenLabs API Key](https://elevenlabs.io) — for high-quality TTS (optional, falls back to Edge-TTS)
+- [Simli API Key](https://simli.com) — for visual avatar (optional)
+- [Google OAuth Client ID](https://console.cloud.google.com) — for Google login (optional)
 
 ### 1. Clone the Repository
 
@@ -220,15 +237,22 @@ cd WarmUpView.ai
 
 ```bash
 cd backend
-copy .env.example .env
-# Edit .env and fill in your API keys
+# Create .env file with your API keys:
 ```
 
 Required keys in `.env`:
 ```env
-GEMINI_API_KEY=your_gemini_key_here
-GROQ_API_KEY=your_groq_key_here
+GROQ_API_KEYS=your_groq_key_here
+GEMINI_API_KEYS=your_gemini_key_here
 DEEPGRAM_API_KEY=your_deepgram_key_here
+
+# Optional — enhances experience:
+ELEVENLABS_API_KEYS=your_elevenlabs_key_here
+ELEVENLABS_VOICE_ID=cjVigY5qzO86Hznl2qUK
+SIMLI_API_KEYS=your_simli_key_here
+SIMLI_FACE_ID=your_face_id_here
+GOOGLE_CLIENT_ID=your_google_client_id_here
+AUTH_SECRET_KEY=your_secret_key_here
 ```
 
 ### 3. Install Dependencies
@@ -249,6 +273,8 @@ uvicorn app.main:app --reload --port 8000
 
 Navigate to **http://localhost:8000** in your browser.
 
+> **Note:** SQLite is used by default — the database tables are automatically created when the server starts for the first time. No manual database setup needed.
+
 ---
 
 ## 📁 Project Structure
@@ -257,50 +283,84 @@ Navigate to **http://localhost:8000** in your browser.
 WarmUpView.ai/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                  # FastAPI entry point, CORS, routers
-│   │   ├── config.py                # Settings, API keys, file paths
-│   │   ├── database.py              # SQLAlchemy async engine & sessions
-│   │   ├── models.py                # ORM models (6 tables)
-│   │   ├── warmup/                  # Warm-up interview module
-│   │   │   ├── routes.py            # REST + WebSocket routes
-│   │   │   └── websocket_handler.py # Real-time interview logic
-│   │   ├── real_interview/          # Real interview module
-│   │   │   ├── routes.py            # CV upload, sessions, reports
-│   │   │   └── websocket_handler.py # Live interview WS
-│   │   ├── analysis/                # ML analysis pipeline
-│   │   │   ├── analysis_worker.py   # Background subprocess runner
-│   │   │   ├── emotion_analyzer.py  # Keras CNN — 7 emotions
-│   │   │   ├── gaze_analyzer.py     # MediaPipe iris tracking
-│   │   │   ├── pose_analyzer.py     # MediaPipe body landmarks
-│   │   │   ├── video_processor.py   # OpenCV frame extraction
-│   │   │   └── report_generator.py  # Gemini score synthesis
-│   │   ├── core/                    # Shared services
-│   │   │   ├── llm_manager.py       # Groq/Gemini abstraction
-│   │   │   ├── question_engine.py   # Stage-based Q&A engine
-│   │   │   └── vtt_service.py       # Voice-to-text utilities
-│   │   ├── auth/                    # Authentication
-│   │   └── admin/                   # Admin panel
-│   ├── requirements.txt
-│   └── .env.example
+│   │   ├── main.py                     # FastAPI entry point, CORS, routers
+│   │   ├── config.py                   # Settings & API keys from .env
+│   │   ├── database.py                 # SQLAlchemy async engine & sessions
+│   │   ├── models.py                   # ORM models (7 tables)
+│   │   ├── warmup/                     # Warm-up interview module
+│   │   │   ├── routes.py              # REST endpoints for sessions
+│   │   │   └── websocket.py           # Real-time interview WS handler
+│   │   ├── real_interview/             # Real interview module
+│   │   │   ├── routes.py             # CV upload, sessions, reports, Simli, TTS
+│   │   │   ├── websocket.py          # Live interview WS handler
+│   │   │   ├── recorder_manager.py   # Storage directory management
+│   │   │   ├── report_generator.py   # Report synthesis
+│   │   │   └── validators.py         # Input validation
+│   │   ├── analysis/                   # ML analysis pipeline
+│   │   │   ├── analysis_worker.py    # Background subprocess runner
+│   │   │   ├── emotion_analyzer.py   # Keras CNN — 7 emotions
+│   │   │   ├── gaze_analyzer.py      # MediaPipe iris tracking
+│   │   │   ├── pose_analyzer.py      # MediaPipe body landmarks
+│   │   │   ├── video_processor.py    # OpenCV frame extraction
+│   │   │   ├── timeline_builder.py   # Per-second data merge
+│   │   │   ├── snapshot_extractor.py # Peak frame extraction
+│   │   │   ├── transcript_evaluator.py # Transcript quality scoring
+│   │   │   └── report_generator.py   # Gemini score synthesis
+│   │   ├── services/                   # Shared service layer
+│   │   │   ├── llm_service.py        # Groq LLM client (GroqLLM class)
+│   │   │   ├── stt_service.py        # Deepgram STT integration
+│   │   │   ├── tts_service.py        # Edge-TTS synthesis
+│   │   │   ├── evaluation_service.py # Session evaluation logic
+│   │   │   └── session_service.py    # Session CRUD operations
+│   │   ├── core/                       # Core utilities
+│   │   │   ├── question_engine.py    # Stage-based Q&A engine
+│   │   │   ├── llm_health_manager.py # LLM health & rate limit tracking
+│   │   │   ├── response_validator.py # AI response validation & repair
+│   │   │   └── transcript_buffer.py  # Audio transcript buffering
+│   │   ├── auth/                       # Authentication
+│   │   │   ├── routes.py             # Login, signup, Google OAuth
+│   │   │   └── deps.py              # Auth dependencies
+│   │   └── admin/                      # Admin panel
+│   │       └── routes.py             # User management endpoints
+│   └── requirements.txt
 ├── frontend/
-│   ├── index.html                   # Main dashboard
-│   ├── admin.html                   # Admin panel
-│   ├── profile.html                 # User profile
-│   ├── warmup/                      # Warm-up UI
-│   │   └── session.html
-│   ├── real_interview/              # Real interview UI
-│   │   ├── setup.html
-│   │   ├── interview.html
-│   │   └── report.html
-│   ├── cv_analysis/                 # CV analysis UI
-│   ├── auth/                        # Login / signup
-│   ├── css/                         # Stylesheets
-│   ├── js/                          # Shared JavaScript
+│   ├── index.html                      # Main dashboard
+│   ├── admin.html                      # Admin panel
+│   ├── profile.html                    # User profile
+│   ├── auth/
+│   │   ├── auth.html                  # Login & signup page
+│   │   ├── auth.js                    # Auth logic
+│   │   └── auth.css                   # Auth styles
+│   ├── warmup/                         # Warm-up module
+│   │   ├── interview.html             # Live warm-up interview page
+│   │   ├── interview.js               # Interview logic & WebSocket
+│   │   ├── session.html               # Session review page
+│   │   ├── session.js                 # Session viewer logic
+│   │   └── avatar.js                  # AI avatar animation & lip-sync
+│   ├── real_interview/                 # Real interview module
+│   │   ├── real_interview.html        # Live interview + Monaco editor
+│   │   ├── real_interview.js          # Interview WS + recording logic
+│   │   ├── report.html                # Multimodal analytics report
+│   │   ├── report.js                  # Report rendering & charts
+│   │   ├── history.html               # Session history with filters
+│   │   └── history.js                 # Status polling & filter logic
+│   ├── cv_analysis/
+│   │   └── cv_analysis.html           # CV upload + ATS analysis viewer
+│   ├── css/
+│   │   ├── style.css                  # Global design system
+│   │   ├── layout.css                 # Shared layout styles
+│   │   └── home.css                   # Dashboard styles
+│   ├── js/
+│   │   ├── layout.js                  # Shared nav, theme toggle, auth guard
+│   │   ├── app.js                     # Dashboard logic
+│   │   ├── home.js                    # Home page logic
+│   │   ├── admin.js                   # Admin panel logic
+│   │   └── auth-guard.js             # Route protection
 │   └── images/
 ├── docs/
-│   ├── images/                      # Architecture diagrams
-│   ├── screenshots/                 # UI screenshots
-│   └── architecture.md             # Detailed architecture docs
+│   ├── images/                         # Architecture diagrams
+│   ├── screenshots/                    # UI screenshots
+│   └── architecture.md                # Detailed architecture docs
 └── README.md
 ```
 
@@ -323,7 +383,7 @@ The warm-up module features 4 distinct AI interviewer personas:
 
 ### Warm-up Interview
 1. Select your AI persona → Session created in DB
-2. AI greets you via TTS (Edge-TTS) + animated avatar lip-sync
+2. AI greets you via Edge-TTS + animated avatar lip-sync
 3. Speak into microphone → streamed to Deepgram STT in real-time
 4. Transcript buffered (3.5s silence threshold) → sent to Groq LLM
 5. AI responds via TTS → saved to session transcript
@@ -333,7 +393,7 @@ The warm-up module features 4 distinct AI interviewer personas:
 ### Real Interview
 1. Upload CV (PDF) → parsed by PyPDF, stored in DB
 2. Paste job description → Groq generates 7 tailored questions
-3. Interview begins: webcam records (WebM), AI asks questions via TTS
+3. Interview begins: webcam records (WebM), Simli visual avatar presents, AI asks questions via ElevenLabs TTS
 4. Optional: coding challenge in Monaco Editor with countdown timer
 5. Session ends → video uploaded to server → analysis subprocess spawned
 6. 5-step ML pipeline runs: frame extraction → 3 parallel analyzers → timeline → scoring
@@ -341,15 +401,9 @@ The warm-up module features 4 distinct AI interviewer personas:
 
 ---
 
-## 📄 License
-
-This project is licensed under the **MIT License** — see [LICENSE](LICENSE) for details.
-
----
-
 <div align="center">
 
-Built with ❤️ using FastAPI, Google Gemini, Groq, Deepgram & MediaPipe
+Built with ❤️ using FastAPI, Groq, Google Gemini, ElevenLabs, Deepgram, Simli & MediaPipe
 
 **[⬆ Back to top](#%EF%B8%8F-warmupviewai)**
 

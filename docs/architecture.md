@@ -38,13 +38,15 @@
 │  └──────┬──────┘  └──────┬───────┘  └──────────┬───────────┘  │
 │         │                │                      │              │
 │  ┌──────▼────────────────▼──────────────────────▼───────────┐  │
-│  │              Core Services                               │  │
-│  │  LLM Manager │ Question Engine │ Auth │ Session Manager  │  │
+│  │              Core Services & Shared Layer                │  │
+│  │  LLM Service │ Question Engine │ Auth │ Session Manager  │  │
+│  │  Response Validator │ LLM Health │ Transcript Buffer     │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                         │                                      │
 │  ┌──────────────────────▼───────────────────────────────────┐  │
 │  │         Analysis Worker (background subprocess)          │  │
 │  │  Emotion (Keras) │ Gaze (MediaPipe) │ Pose (MediaPipe)  │  │
+│  │  Timeline Builder │ Snapshot Extractor │ Transcript Eval │  │
 │  └──────────────────────┬───────────────────────────────────┘  │
 └─────────────────────────┼───────────────────────────────────────┘
                           ▼
@@ -54,7 +56,7 @@
              └─────────────────────┘
 
 External APIs:
-  Groq (LLM) │ Google Gemini │ Deepgram (STT) │ Edge-TTS
+  Groq (LLM) │ Google Gemini │ Deepgram (STT) │ ElevenLabs (TTS) │ Edge-TTS │ Simli (Avatar)
 ```
 
 ---
@@ -62,45 +64,72 @@ External APIs:
 ## 2. Backend Modules
 
 ### `backend/app/main.py`
-FastAPI entry point — configures CORS, mounts all sub-routers, creates DB tables on startup.
+FastAPI entry point — configures CORS + SessionMiddleware, mounts all sub-routers (warmup, real_interview, auth, admin), creates DB tables on startup, serves frontend as static files.
 
 ### `backend/app/models.py`
-SQLAlchemy ORM definitions for all 6 database tables.
+SQLAlchemy ORM definitions for all **7 database tables**: `users`, `interview_sessions`, `session_messages`, `cv_profiles`, `job_requirements`, `real_interview_sessions`, `analysis_results`.
 
 ### `backend/app/config.py`
-Centralizes all environment variables: API keys, file system paths, feature flags.
+Centralizes all environment variables: API keys (Groq, Gemini, Deepgram, ElevenLabs, Simli), Google OAuth Client ID, database URL, TTS voice config, auth secret.
 
 ### `backend/app/database.py`
 Async SQLAlchemy engine + session factory + startup/shutdown lifecycle.
 
+### `backend/app/services/`
+| File | Purpose |
+|---|---|
+| `llm_service.py` | Groq LLM client (`GroqLLM` class) — multi-key rotation, health management, response validation, conversation history, anti-duplicate/anti-repetition guards |
+| `stt_service.py` | Deepgram STT integration for real-time streaming transcription |
+| `tts_service.py` | Edge-TTS synthesis (Microsoft Neural Voices) — used for warm-up module |
+| `evaluation_service.py` | Session evaluation logic (Groq-based scoring) |
+| `session_service.py` | Session CRUD operations |
+
 ### `backend/app/warmup/`
 | File | Purpose |
 |---|---|
-| `routes.py` | REST endpoints for sessions CRUD + WebSocket upgrade |
-| `websocket_handler.py` | Real-time interview logic: STT buffer, LLM routing, TTS, stage management |
+| `routes.py` | REST endpoints for warm-up sessions CRUD + WebSocket upgrade |
+| `websocket.py` | Real-time interview logic: Deepgram STT buffer, Groq LLM routing, Edge-TTS, stage management, silence detection |
 
 ### `backend/app/real_interview/`
 | File | Purpose |
 |---|---|
-| `routes.py` | CV upload, job requirements, session management, video upload, report retrieval |
-| `websocket_handler.py` | Live interview WebSocket: question delivery, acknowledgment, session end signal |
+| `routes.py` | CV upload (PyPDF extraction), job requirements, session management, video upload, analysis trigger, report retrieval, Simli session tokens, ElevenLabs/Edge-TTS endpoints |
+| `websocket.py` | Live interview WebSocket: question delivery, acknowledgment, session end signal |
+| `recorder_manager.py` | Ensures storage directories exist (recordings/, snapshots/, uploads/) |
+| `report_generator.py` | Synthesizes analysis data into report format |
+| `validators.py` | Input validation for CV, job requirements, and sessions |
 
 ### `backend/app/analysis/`
 | File | Purpose |
 |---|---|
-| `analysis_worker.py` | Spawns as subprocess via `Popen`, runs all 5 pipeline steps |
-| `emotion_analyzer.py` | Loads Keras CNN model, runs per-frame emotion classification |
-| `gaze_analyzer.py` | MediaPipe FaceMesh — iris deviation → eye contact boolean |
-| `pose_analyzer.py` | MediaPipe Pose — 33 landmarks → posture score + signal detection |
+| `analysis_worker.py` | Spawns as subprocess via `Popen`, orchestrates all 5 pipeline steps |
+| `emotion_analyzer.py` | Loads Keras CNN model, runs per-frame emotion classification (48×48 grayscale → 7 classes) |
+| `gaze_analyzer.py` | MediaPipe FaceMesh — iris deviation → eye contact boolean (threshold: 0.06) |
+| `pose_analyzer.py` | MediaPipe Pose — 33 landmarks → posture score + signal detection (hand_on_head, leaning, etc.) |
 | `video_processor.py` | OpenCV frame extraction at 1 fps |
+| `timeline_builder.py` | Merges per-second data from all 3 analyzers into unified JSON timeline |
+| `snapshot_extractor.py` | Detects peak emotional/postural moments and saves key frames as JPEG |
+| `transcript_evaluator.py` | Evaluates interview transcript quality using AI |
 | `report_generator.py` | Calls Gemini to synthesize raw metrics into qualitative feedback |
 
 ### `backend/app/core/`
 | File | Purpose |
 |---|---|
-| `llm_manager.py` | Unified wrapper for Groq and Gemini APIs |
-| `question_engine.py` | Stage-based question pool management, random selection, no-repeat logic |
-| `vtt_service.py` | Voice-to-text helper utilities |
+| `question_engine.py` | Stage-based question pool management (5 stages × 5–10 questions each), random selection, no-repeat logic, persona configs |
+| `llm_health_manager.py` | Tracks LLM success/failure rates, manages backoff delays, health gate for degraded mode |
+| `response_validator.py` | Validates AI responses (completeness, format, persona compliance), generates repair instructions |
+| `transcript_buffer.py` | Buffers incoming transcript fragments, flushes after 3.5s silence |
+
+### `backend/app/auth/`
+| File | Purpose |
+|---|---|
+| `routes.py` | Login, signup, Google OAuth callback, session management, profile endpoints |
+| `deps.py` | Auth dependencies — current user extraction from session |
+
+### `backend/app/admin/`
+| File | Purpose |
+|---|---|
+| `routes.py` | Admin endpoints — user listing, admin promotion, user management |
 
 ---
 
@@ -108,28 +137,39 @@ Async SQLAlchemy engine + session factory + startup/shutdown lifecycle.
 
 ```
 frontend/
-├── index.html              ← Dashboard / navigation hub
-├── admin.html              ← Admin panel (user management)
-├── profile.html            ← User profile & settings
+├── index.html                  ← Dashboard / navigation hub
+├── admin.html                  ← Admin panel (user management)
+├── profile.html                ← User profile & settings
 ├── auth/
-│   ├── login.html
-│   └── signup.html
+│   ├── auth.html               ← Combined login & signup page
+│   ├── auth.js                 ← Auth logic (email + Google OAuth)
+│   └── auth.css                ← Auth styles
 ├── warmup/
-│   └── session.html        ← Live warm-up interface + avatar
+│   ├── interview.html          ← Live warm-up interview + avatar
+│   ├── interview.js            ← Interview WebSocket logic
+│   ├── session.html            ← Session review / transcript viewer
+│   ├── session.js              ← Session viewer logic
+│   └── avatar.js               ← Animated AI avatar + lip-sync
 ├── real_interview/
-│   ├── setup.html          ← CV upload + job description entry
-│   ├── interview.html      ← Live interview + Monaco editor
-│   ├── history.html        ← Session history with filter
-│   └── report.html         ← Multimodal analytics report
+│   ├── real_interview.html     ← Live interview + Monaco code editor
+│   ├── real_interview.js       ← Interview WS + recording + Simli
+│   ├── report.html             ← Multimodal analytics report
+│   ├── report.js               ← Report rendering & charts
+│   ├── history.html            ← Session history with filter & status
+│   └── history.js              ← Status polling, filter, bulk delete
 ├── cv_analysis/
-│   └── index.html          ← CV upload + ATS analysis viewer
+│   └── cv_analysis.html        ← CV upload + ATS analysis viewer
 ├── css/
-│   └── style.css           ← Global design system
-└── js/
-    ├── layout.js           ← Shared nav, theme toggle, auth guard
-    ├── history.js          ← Status polling, filter, bulk delete
-    ├── avatar.js           ← Animated AI avatar + lip-sync
-    └── app.js              ← Dashboard logic
+│   ├── style.css               ← Global design system
+│   ├── layout.css              ← Shared layout styles
+│   └── home.css                ← Dashboard styles
+├── js/
+│   ├── layout.js               ← Shared nav, theme toggle, auth guard
+│   ├── app.js                  ← Dashboard initialization
+│   ├── home.js                 ← Home page logic
+│   ├── admin.js                ← Admin panel logic
+│   └── auth-guard.js           ← Route protection / auth check
+└── images/
 ```
 
 ---
@@ -138,22 +178,27 @@ frontend/
 
 ```
 Warm-up Module
-├── Conversation (all turns)    →  Groq  (llama-3.3-70b-versatile)
-└── Evaluation Report           →  Groq  (llama-3.3-70b-versatile)
+├── Conversation (all turns)     →  Groq  (llama-3.3-70b-versatile)
+├── Evaluation Report            →  Groq  (llama-3.3-70b-versatile)
+└── TTS                          →  Edge-TTS (Microsoft Neural Voices)
 
 Real Interview Module
-├── Question Generation         →  Groq  (llama-3.3-70b-versatile)
-├── Coding Task Generation      →  Groq  (llama-3.3-70b-versatile)
-├── Audio Tone Analysis         →  Gemini (gemini-2.5-flash, audio inline)
-└── Tone Fallback               →  Librosa (local)
+├── Question Generation          →  Groq  (llama-3.3-70b-versatile)
+├── Coding Task Generation       →  Groq  (llama-3.3-70b-versatile)
+├── Audio Tone Analysis          →  Gemini (gemini-2.5-flash, audio inline)
+├── Tone Fallback                →  Librosa (local)
+├── TTS (primary)                →  ElevenLabs (streaming PCM/MP3)
+├── TTS (fallback)               →  Edge-TTS
+└── Visual Avatar                →  Simli (WebRTC)
 
 CV Analysis Module
-└── ATS Feedback + Annotations  →  Gemini (gemini-2.5-flash)
+└── ATS Feedback + Annotations   →  Gemini (gemini-2.5-flash)
 ```
 
 **Why split?**
-- Groq is used for high-frequency, latency-sensitive text generation (conversation turns, real-time)
-- Gemini is used for multimodal tasks (audio understanding, document analysis)
+- **Groq** is used for high-frequency, latency-sensitive text generation (conversation turns, real-time)
+- **Gemini** is used for multimodal tasks (audio understanding, document analysis)
+- **ElevenLabs** provides higher-quality voices for real interviews; Edge-TTS is free for warm-up practice
 
 ---
 
@@ -165,44 +210,45 @@ Recorded Video (.webm)
         ▼
 ┌───────────────────────────────────┐
 │ Step 1: Frame Extraction (OpenCV) │
+│   video_processor.py              │
 │   → 1 frame per second            │
 │   → frames[] array in memory      │
 └──────────────┬────────────────────┘
                │ frames[]
-       ┌───────┴────────┐
-       │                │ (parallel)
-       ▼                ▼
-┌─────────────┐  ┌─────────────────┐  ┌──────────────────┐
-│  Emotion    │  │ Gaze Analyzer   │  │  Pose Analyzer   │
-│  Analyzer   │  │ MediaPipe Face  │  │  MediaPipe Pose  │
-│  Keras CNN  │  │ Mesh + Iris     │  │  33 landmarks    │
-│  48x48 gray │  │ deviation<0.06  │  │  posture signals │
-│  7 emotions │  │ → eye_contact   │  │  → posture_score │
-└──────┬──────┘  └───────┬─────────┘  └────────┬─────────┘
-       └──────────────────┼────────────────────┘
-                          ▼
-              ┌───────────────────────┐
-              │  Step 3: Timeline     │
-              │  Builder              │
-              │  Merge per-second     │
-              │  JSON from all 3      │
-              └──────────┬────────────┘
-                         │
-              ┌──────────┴──────────┐
-              │                     │
-              ▼                     ▼
-   ┌──────────────────┐  ┌────────────────────┐
-   │ Step 4: Peak     │  │ Step 5: Score      │
-   │ Snapshots        │  │ Calculator         │
-   │ Extract key      │  │ Weighted formula   │
-   │ frames as JPEG   │  │ → overall_score    │
-   └──────┬───────────┘  └────────┬───────────┘
+       ┌───────┼────────┐
+       │       │        │ (parallel)
+       ▼       ▼        ▼
+┌───────────┐ ┌─────────────┐ ┌──────────────┐
+│ Emotion   │ │ Gaze        │ │ Pose         │
+│ Analyzer  │ │ Analyzer    │ │ Analyzer     │
+│ Keras CNN │ │ MediaPipe   │ │ MediaPipe    │
+│ 48x48     │ │ FaceMesh    │ │ Pose         │
+│ grayscale │ │ Iris devn   │ │ 33 landmarks │
+│ 7 classes │ │ < 0.06      │ │ signals      │
+└─────┬─────┘ └──────┬──────┘ └──────┬───────┘
+      └───────────────┼───────────────┘
+                      ▼
+          ┌───────────────────────┐
+          │ Step 3: Timeline      │
+          │ timeline_builder.py   │
+          │ Merge per-second JSON │
           └──────────┬────────────┘
-                     ▼
-          ┌────────────────────────┐
-          │  SQLite DB             │
-          │  analysis_results table│
-          └────────────────────────┘
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+          ▼                     ▼
+┌──────────────────┐ ┌────────────────────┐
+│ Step 4: Peak     │ │ Step 5: Score      │
+│ Snapshots        │ │ Calculator         │
+│ snapshot_         │ │ Weighted formula   │
+│ extractor.py     │ │ → overall_score    │
+└──────┬───────────┘ └────────┬───────────┘
+       └──────────┬────────────┘
+                  ▼
+       ┌────────────────────────┐
+       │  SQLite DB             │
+       │  analysis_results      │
+       └────────────────────────┘
 ```
 
 ---
@@ -210,42 +256,66 @@ Recorded Video (.webm)
 ## 6. Database Schema (ERD)
 
 ```
+users
+─────
+id (PK)
+email (unique)
+name
+password_hash
+auth_provider         # "email" | "google"
+google_sub
+picture_url
+is_admin              # 0=user, 1=admin
+created_at
+
+
 interview_sessions          session_messages
 ─────────────────           ────────────────
 id (PK)              1──<  id (PK)
-user_id                     session_id (FK)
-persona                     role
+user_id                     session_id (FK → interview_sessions)
+persona                     role          # "user" | "salma" etc.
 stage                       message
 started_at                  timestamp
 ended_at
 evaluation_json
+score
 label
 
 
 cv_profiles                 job_requirements
 ───────────                 ────────────────
 id (PK)              1──<  id (PK)
-file_path                   cv_profile_id (FK)
+user_id (FK → users)        user_id (FK → users)
+file_path                   cv_profile_id (FK → cv_profiles)
 extracted_data_json         requirements_text
 cv_hash                     job_hash
 created_at                  generated_questions_json
                             created_at
 
 
-real_interview_sessions     analysis_results
-───────────────────────     ────────────────
-id (PK)              1──1  id (PK)
-cv_profile_id (FK)          session_id (FK)
-job_req_id (FK)             emotion_json
-status                      gaze_json
-video_path                  pose_json
-timeline_path               snapshots_json
-started_at                  overall_scores
-ended_at                    non_verbal_feedback
-                            created_at
+real_interview_sessions          analysis_results
+───────────────────────          ────────────────
+id (PK)                   1──1  id (PK)
+user_id (FK → users)             session_id (FK → real_interview_sessions)
+cv_profile_id (FK)               emotion_json
+job_req_id (FK)                  gaze_json
+status                           pose_json
+video_path                       snapshots_json
+timeline_path                    overall_scores
+interview_transcript             non_verbal_feedback
+started_at                       transcript_evaluation_json
+ended_at                         created_at
 
-cv_profiles ──< real_interview_sessions
-job_requirements ──< real_interview_sessions
+Relationships:
+  users ──< interview_sessions (via user_id)
+  users ──< cv_profiles (via user_id)
+  users ──< job_requirements (via user_id)
+  users ──< real_interview_sessions (via user_id)
+  interview_sessions ──< session_messages
+  cv_profiles ──< job_requirements
+  cv_profiles ──< real_interview_sessions
+  job_requirements ──< real_interview_sessions
+  real_interview_sessions ──1 analysis_results
 ```
 
 ---
@@ -271,11 +341,11 @@ Acceptance = (Emotion × 0.20) + (Eye Contact × 0.25) + (Posture × 0.20) + (To
 | Tone Score | Gemini / Librosa | `confidence×0.6 + (1-hesitation)×0.4` | 0.0 – 1.0 |
 | Coding Score | Frontend | submitted=0.9 / timeout+code=0.6 / no code=0.3 | 0.3 – 0.9 |
 
-**Positive emotions:** happy, neutral, surprise  
-**Eye contact threshold:** iris deviation < 0.06 (normalized)  
+**Positive emotions:** happy, neutral, surprise
+**Eye contact threshold:** iris deviation < 0.06 (normalized)
 **Posture signals:** hand_on_head, leaning_back, leaning_left/right, excessive_movement
 
-### Warm-up Evaluation (Groq)
+### Warm-up Evaluation (Groq LLM)
 ```json
 {
   "overall_score": 7.4,
@@ -296,7 +366,7 @@ Performance bands: `0–3 Poor` | `3–5 Developing` | `5–7 Good` | `7–8.5 S
 
 ## 8. WebSocket Protocol
 
-### Warm-up Interview (`/ws/warmup/interview/{session_id}`)
+### Warm-up Interview (`/ws/warmup/interview?persona=friendly`)
 
 **Client → Server:**
 ```json
@@ -312,7 +382,7 @@ Performance bands: `0–3 Poor` | `3–5 Developing` | `5–7 Good` | `7–8.5 S
 { "type": "server_end", "evaluation": { ... } }
 ```
 
-### Real Interview (`/ws/real-interview/{session_id}`)
+### Real Interview (`/ws/real-interview?session_id=123`)
 
 **Client → Server:**
 ```json
